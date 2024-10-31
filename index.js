@@ -21,8 +21,32 @@ fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
 // Constants
-const SYSTEM_MESSAGE = 'You are a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.';
-const VOICE = 'alloy';
+const SYSTEM_MESSAGE = `You are helpful, friendly, upbeat, encouraging, and professional. Here is the script that our agents currently use to talk to customers. Try to stick to it as closely as possible.
+
+Hi, this is (Agent Name) calling with American Saver Security, on a recorded line. How are you today?
+
+I am following up on your online request for some home security options.
+
+What sparked your interest to look for a security system? 
+
+What products  were you looking for,  cameras, door sensors…
+
+And will this be the first security system you’ve had on this home?
+
+Great,  it looks like we may have some good options for you. Let me grab my SmartHome Professional on the line with us to go over those with you. 
+Real quick before I grab them, what would you estimate your credit score to be at? 
+
+Okay It will just be a brief hold while I grab them, okay?
+
+(Right here, transfer to specialist)
+
+This is (Agent Name) I have (Customer Name) on the line with me and they are looking for some security options for their home . They mentioned that they were interested in a security system for (Reason). They estimate their credit score to be xxx. Can I bring them on? (merge the calls)
+
+Hey (Lead Name), thank you for your patience, I have my smart home pro (Pro name) on the line with us. I let them know you are looking for (Product) because (Reason). You are in great hands with (SmartHome Pro Name) they will help you from here and I hope you have a great rest of your day.
+
+If they get frustrated, (transfer to agent).
+`;
+const VOICE = 'ash';
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
 
 // List of Event Types to log to the console. See the OpenAI Realtime API Documentation: https://platform.openai.com/docs/api-reference/realtime
@@ -50,9 +74,6 @@ fastify.get('/', async (request, reply) => {
 fastify.all('/incoming-call', async (request, reply) => {
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say>Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open-A.I. Realtime API</Say>
-                              <Pause length="1"/>
-                              <Say>O.K. you can start talking!</Say>
                               <Connect>
                                   <Stream url="wss://${request.headers.host}/media-stream" />
                               </Connect>
@@ -92,6 +113,53 @@ fastify.register(async (fastify) => {
                     instructions: SYSTEM_MESSAGE,
                     modalities: ["text", "audio"],
                     temperature: 0.8,
+                    tools: [{
+                        type: 'function',
+                        name: 'transferToSpecialist',
+                        description: 'completes the call and transfers the caller to a specialist. ONLY USE THIS IF THE CALLER IS INTERESTED IN LEARNING MORE ABOUT HOME SECURITY SOLUTIONS',
+                        parameters: {
+                          type: 'object',
+                          properties: {
+                            sid: {
+                              type: 'string',
+                              description: 'the current call SID'
+                            }
+                          },
+                          required: ['sid']
+                        }
+                      },
+                      {
+                        type: 'function',
+                        name: 'mergeCalls',
+                        description: 'Merges the customer call with the specialist call',
+                        parameters: {
+                          type: 'object',
+                          properties: {
+                            sid: {
+                              type: 'string',
+                              description: 'the current call SID'
+                            }
+                          },
+                          required: ['sid']
+                        }
+                      },
+                      {
+                        type: 'function',
+                        name: 'transferToAgent',
+                        description: 'transfers the caller to an agent. typically in the event that they are getting really frustrated and need to be transferred to a human. ONLY USE THIS IF THE USER IS FRUSTRATED',
+                        parameters: {
+                          type: 'object',
+                          properties: {
+                            sid: {
+                              type: 'string',
+                              description: 'the current call SID'
+                            }
+                          },
+                          required: ['sid']
+                        }
+                      }
+                    ],
+                    tool_choice: 'auto'
                 }
             };
 
@@ -99,7 +167,7 @@ fastify.register(async (fastify) => {
             openAiWs.send(JSON.stringify(sessionUpdate));
 
             // Uncomment the following line to have AI speak first:
-            // sendInitialConversationItem();
+            sendInitialConversationItem();
         };
 
         // Send initial conversation item if AI talks first
@@ -112,7 +180,7 @@ fastify.register(async (fastify) => {
                     content: [
                         {
                             type: 'input_text',
-                            text: 'Greet the user with "Hello there! I am an AI voice assistant powered by Twilio and the OpenAI Realtime API. You can ask me for facts, jokes, or anything you can imagine. How can I help you?"'
+                            text: 'Greet the user with "Hi, this is (Agent Name) calling with American Saver Security, on a recorded line. How are you today?"'
                         }
                     ]
                 }
@@ -199,6 +267,54 @@ fastify.register(async (fastify) => {
                     }
                     
                     sendMark(connection, streamSid);
+                }
+
+                if (response.type === 'response.output_item.done'){
+                    const { item } = response;
+                    
+                    if (item.type === 'function_call') {
+                        if (item.name === 'transferToSpecialist') {
+                                                        
+                            openAiWs.send(JSON.stringify({
+                            type: 'conversation.item.create',
+                            item: {
+                                type: 'function_call_output',
+                                call_id: item.call_id,
+                                output: "Right here, transfer to specialist"
+                            }
+                            }));
+                            
+                            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                            
+                        }
+                        if (item.name === 'mergeCalls') {
+                            
+                            openAiWs.send(JSON.stringify({
+                            type: 'conversation.item.create',
+                            item: {
+                                type: 'function_call_output',
+                                call_id: item.call_id,
+                                output: "Right here, merge the calls"
+                            }
+                            }));
+                            
+                            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                            
+                        }
+                        if (item.name === 'transferToAgent') {
+                            
+                            openAiWs.send(JSON.stringify({
+                                type: 'conversation.item.create',
+                                item: {
+                                    type: 'function_call_output',
+                                    call_id: item.call_id,
+                                    output: "Right here, transfer to a human agent"
+                                }
+                                }));
+                                
+                            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                        }
+                    }
                 }
 
                 if (response.type === 'input_audio_buffer.speech_started') {
