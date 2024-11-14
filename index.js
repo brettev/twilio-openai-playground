@@ -3,12 +3,17 @@ import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
+//import { DocumentProcessor } from './utils/documentProcessor.js';
+import twilio from 'twilio';
+
+const args = process.argv.slice(2); // Get command line arguments
+const envFile = args[0] || '.env';  // Use the provided argument or default to '.env'
 
 // Load environment variables from .env file
-dotenv.config();
+dotenv.config({ path: envFile });
 
 // Retrieve the OpenAI API key from environment variables.
-const { OPENAI_API_KEY } = process.env;
+const { OPENAI_API_KEY, SYSTEM_MESSAGE, VOICE, OPENING_MESSAGE, INBOUND_CALL, TRANSFER_PHONE_NUMBER } = process.env;
 
 if (!OPENAI_API_KEY) {
     console.error('Missing OpenAI API key. Please set it in the .env file.');
@@ -20,34 +25,8 @@ const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
-// Constants
-const SYSTEM_MESSAGE = `You are helpful, friendly, upbeat, encouraging, and professional. Here is the script that our agents currently use to talk to customers. Try to stick to it as closely as possible.
-
-Hi, this is (Agent Name) calling with American Saver Security, on a recorded line. How are you today?
-
-I am following up on your online request for some home security options.
-
-What sparked your interest to look for a security system? 
-
-What products  were you looking for,  cameras, door sensors…
-
-And will this be the first security system you’ve had on this home?
-
-Great,  it looks like we may have some good options for you. Let me grab my SmartHome Professional on the line with us to go over those with you. 
-Real quick before I grab them, what would you estimate your credit score to be at? 
-
-Okay It will just be a brief hold while I grab them, okay?
-
-(Right here, transfer to specialist)
-
-This is (Agent Name) I have (Customer Name) on the line with me and they are looking for some security options for their home . They mentioned that they were interested in a security system for (Reason). They estimate their credit score to be xxx. Can I bring them on? (merge the calls)
-
-Hey (Lead Name), thank you for your patience, I have my smart home pro (Pro name) on the line with us. I let them know you are looking for (Product) because (Reason). You are in great hands with (SmartHome Pro Name) they will help you from here and I hope you have a great rest of your day.
-
-If they get frustrated, (transfer to agent).
-`;
-const VOICE = 'ash';
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
+let currentCallSid = null; // Add this line to declare the variable globally
 
 // List of Event Types to log to the console. See the OpenAI Realtime API Documentation: https://platform.openai.com/docs/api-reference/realtime
 const LOG_EVENT_TYPES = [
@@ -64,6 +43,12 @@ const LOG_EVENT_TYPES = [
 // Show AI response elapsed timing calculations
 const SHOW_TIMING_MATH = false;
 
+if(false){
+    // Initialize the document processor
+    const documentProcessor = new DocumentProcessor(OPENAI_API_KEY);
+    await documentProcessor.initialize();
+}
+
 // Root Route
 fastify.get('/', async (request, reply) => {
     reply.send({ message: 'Twilio Media Stream Server is running!' });
@@ -72,6 +57,9 @@ fastify.get('/', async (request, reply) => {
 // Route for Twilio to handle incoming calls
 // <Say> punctuation to improve text-to-speech translation
 fastify.all('/incoming-call', async (request, reply) => {
+    currentCallSid = request.body.CallSid; // Capture the CallSid from the incoming request
+    console.log('Incoming call SID:', currentCallSid);
+    
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
                               <Connect>
@@ -80,6 +68,29 @@ fastify.all('/incoming-call', async (request, reply) => {
                           </Response>`;
 
     reply.type('text/xml').send(twimlResponse);
+});
+
+// Add this new route to handle transfers
+fastify.post('/transfer', async (request, reply) => {
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+    const client = twilio(accountSid, authToken);
+
+    try {
+        const call = await client.calls(request.body.callSid)
+            .update({
+                twiml: `<?xml version="1.0" encoding="UTF-8"?>
+                        <Response>
+                            <Say>Transferring you to an agent now.</Say>
+                            <Dial>${TRANSFER_PHONE_NUMBER}</Dial>
+                        </Response>`
+            });
+        
+        reply.send({ success: true, message: 'Call transferred successfully' });
+    } catch (error) {
+        console.error('Error transferring call:', error);
+        reply.status(500).send({ success: false, error: error.message });
+    }
 });
 
 // WebSocket route for media-stream
@@ -106,14 +117,19 @@ fastify.register(async (fastify) => {
             const sessionUpdate = {
                 type: 'session.update',
                 session: {
-                    turn_detection: { type: 'server_vad' },
+                    turn_detection: {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 500
+                    },
                     input_audio_format: 'g711_ulaw',
                     output_audio_format: 'g711_ulaw',
                     voice: VOICE,
                     instructions: SYSTEM_MESSAGE,
                     modalities: ["text", "audio"],
                     temperature: 0.8,
-                    tools: [{
+                    tools: [/* {
                         type: 'function',
                         name: 'transferToSpecialist',
                         description: 'completes the call and transfers the caller to a specialist. ONLY USE THIS IF THE CALLER IS INTERESTED IN LEARNING MORE ABOUT HOME SECURITY SOLUTIONS',
@@ -145,6 +161,59 @@ fastify.register(async (fastify) => {
                       },
                       {
                         type: 'function',
+                        name: 'findHistory',
+                        description: 'Pulls up the customer\'s home loan history and current loan balance',
+                        parameters: {
+                          type: 'object',
+                          properties: {
+                            phone: {
+                              type: 'string',
+                              description: 'the customer\'s phone number'
+                            }
+                          },
+                          required: ['phone']
+                        }
+                      }, */
+                      {
+                        type: 'function',
+                        name: 'scheduleCallback',
+                        description: 'Schedules a callback with the customer. Make sure you ask for the time and date they would like to be called back.',
+                        parameters: {
+                          type: 'object',
+                          properties: {
+                            phone: {
+                              type: 'string',
+                              description: 'the customer\'s phone number'
+                            },
+                            time: {
+                              type: 'string',
+                              description: 'the time the customer would like to be called back'
+                            },
+                            date: {
+                              type: 'string',
+                              description: 'the date the customer would like to be called back'
+                            }
+                          },
+                          required: ['phone', 'time', 'date']
+                        }
+                      },
+                      {
+                        type: 'function',
+                        name: 'addToDNC',
+                        description: 'Adds the customer to the do not call list. Make sure you ask for their phone number before adding them.',
+                        parameters: {
+                          type: 'object',
+                          properties: {
+                            phone: {
+                              type: 'string',
+                              description: 'the customer\'s phone number'
+                            }
+                          },
+                          required: ['phone']
+                        }
+                      },
+                      /* {
+                        type: 'function',
                         name: 'transferToAgent',
                         description: 'transfers the caller to an agent. typically in the event that they are getting really frustrated and need to be transferred to a human. ONLY USE THIS IF THE USER IS FRUSTRATED',
                         parameters: {
@@ -157,7 +226,7 @@ fastify.register(async (fastify) => {
                           },
                           required: ['sid']
                         }
-                      }
+                      } */
                     ],
                     tool_choice: 'auto'
                 }
@@ -167,22 +236,28 @@ fastify.register(async (fastify) => {
             openAiWs.send(JSON.stringify(sessionUpdate));
 
             // Uncomment the following line to have AI speak first:
-            sendInitialConversationItem();
+            if(INBOUND_CALL) sendInitialConversationItem();
         };
 
         // Send initial conversation item if AI talks first
-        const sendInitialConversationItem = () => {
+        const sendInitialConversationItem = async () => {
+            // Query relevant FAQ documents for the initial greeting
+            //const relevantDocs = await documentProcessor.query("security system introduction");
+            
             const initialConversationItem = {
                 type: 'conversation.item.create',
                 item: {
                     type: 'message',
-                    role: 'user',
+                    role: 'assistant',
                     content: [
                         {
                             type: 'input_text',
-                            text: 'Greet the user with "Hi, this is (Agent Name) calling with American Saver Security, on a recorded line. How are you today?"'
+                            text: OPENING_MESSAGE
                         }
-                    ]
+                    ],
+                    //context: {
+                    //    relevant_docs: relevantDocs
+                    //}
                 }
             };
 
@@ -287,6 +362,76 @@ fastify.register(async (fastify) => {
                             openAiWs.send(JSON.stringify({ type: 'response.create' }));
                             
                         }
+                        if (item.name === 'scheduleCallback') {
+
+                            console.log('Scheduling callback:', item);
+                            //hit up five9 API with the phone number, time, and date using the F9TimeToCall and F9TimeFormat parameters
+                            /**
+                             * Scheduling callback: {
+                                id: 'item_ASqli8tfaeRjOPf5Vvkwk',
+                                object: 'realtime.item',
+                                type: 'function_call',
+                                status: 'completed',
+                                name: 'scheduleCallback',
+                                call_id: 'call_0vkZ0rgs8dYBsPgo',
+                                arguments: '{"phone":"801-599-0584","time":"15:00","date":"2024-11-13"}'
+                                }
+                             */
+                                                        
+                            openAiWs.send(JSON.stringify({
+                            type: 'conversation.item.create',
+                            item: {
+                                type: 'function_call_output',
+                                call_id: item.call_id,
+                                output: "Callback Scheduled"
+                            }
+                            }));
+                            
+                            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                            
+                        }
+                        if (item.name === 'addToDNC') {
+
+                            console.log('Adding to DNC:', item);
+                            //hit up five9 API with the phone number, time, and date using the F9TimeToCall and F9TimeFormat parameters
+                            /**
+                             * Adding to DNC: {
+                                id: 'item_ASqli8tfaeRjOPf5Vvkwk',
+                                object: 'realtime.item',
+                                type: 'function_call',
+                                status: 'completed',
+                                name: 'addToDNC',
+                                call_id: 'call_0vkZ0rgs8dYBsPgo',
+                                arguments: '{"phone":"801-599-0584","time":"15:00","date":"2024-11-13"}'
+                                }
+                             */
+                                                        
+                            openAiWs.send(JSON.stringify({
+                            type: 'conversation.item.create',
+                            item: {
+                                type: 'function_call_output',
+                                call_id: item.call_id,
+                                output: "Added to DNC"
+                            }
+                            }));
+                            
+                            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                            
+                        }
+                        if (item.name === 'findHistory') {
+                                                        
+                            openAiWs.send(JSON.stringify({
+                            type: 'conversation.item.create',
+                            item: {
+                                type: 'function_call_output',
+                                call_id: item.call_id,
+                                output: "Right here, I'm pulling up your home loan history and current loan balance."
+                            }
+                            }));
+                            
+                            openAiWs.send(JSON.stringify({ type: 'response.create' }));
+                            
+                        }
                         if (item.name === 'mergeCalls') {
                             
                             openAiWs.send(JSON.stringify({
@@ -302,16 +447,24 @@ fastify.register(async (fastify) => {
                             
                         }
                         if (item.name === 'transferToAgent') {
+                            // Make an internal call to the transfer endpoint
+                            fetch(`https://${request.headers.host}/transfer`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify({ callSid: currentCallSid })
+                            }).catch(error => console.error('Error initiating transfer:', error));
                             
                             openAiWs.send(JSON.stringify({
                                 type: 'conversation.item.create',
                                 item: {
                                     type: 'function_call_output',
                                     call_id: item.call_id,
-                                    output: "Right here, transfer to a human agent"
+                                    output: "I understand you'd like to speak with a human agent. I'm transferring you now."
                                 }
-                                }));
-                                
+                            }));
+                            
                             openAiWs.send(JSON.stringify({ type: 'response.create' }));
                         }
                     }
