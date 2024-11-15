@@ -84,3 +84,65 @@ To have the AI voice assistant talk before the user, uncomment the line `// send
 When the user speaks and OpenAI sends `input_audio_buffer.speech_started`, the code will clear the Twilio Media Streams buffer and send OpenAI `conversation.item.truncate`.
 
 Depending on your application's needs, you may want to use the [`input_audio_buffer.speech_stopped`](https://platform.openai.com/docs/api-reference/realtime-server-events/input_audio_buffer/speech_stopped) event, instead.
+
+# Production
+## First time
+### Install `nvm` and Node.js 18
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+nvm install 18
+```
+
+### Install pm2 and start app process
+```bash
+npm install -g pm2@latest
+cd /var/www/ai-agent-sam
+pm2 start index.js --name=sam.ai
+```
+
+### Configure Apache proxy
+```text
+<VirtualHost *:80>
+    ServerName sam.ai.squeezedev.com
+    ServerAdmin james.fry@squeezedev.com
+
+    ProxyPass / http://localhost:5050/
+    ProxyPassReverse / http://localhost:5050/
+
+    <Proxy *>
+        Require all granted
+    </Proxy>
+    RewriteEngine on
+    RewriteCond %{HTTP:Upgrade} websocket [NC]
+    RewriteCond %{HTTP:Connection} upgrade [NC]
+    RewriteRule ^/?(.*) "ws://localhost:5050/$1" [P,L]
+</VirtualHost>
+```
+
+#### Enable required mods and restart Apache
+```bash
+sudo a2enmod proxy proxy_http
+sudo a2ensite sam.ai.squeezedev.com
+sudo systemctl reload apache2
+```
+
+### Install SSL certs using certbot
+```bash
+sudo certbot --apache
+```
+
+## Deploying updates to production
+```bash
+rsync -avz --delete --exclude-from='./rsync-exclude.txt' . ubuntu@squeeze-payroll:/var/www/ai-agent-sam/
+```
+Then log onto the server and restart the process
+```bash
+ssh squeeze-payroll
+cd /var/www/ai-agent-sam
+pm2 restart sam.ai
+```
+
+## Watching production logs
+```bash
+pm2 logs sam.ai
+```

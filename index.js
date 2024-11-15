@@ -51,18 +51,22 @@ if(false){
 
 // Root Route
 fastify.get('/', async (request, reply) => {
-    reply.send({ message: 'Twilio Media Stream Server is running!' });
+    reply.send({ message: 'Twilio Media Stream Server is running!', headers: request.headers });
 });
 
 // Route for Twilio to handle incoming calls
 // <Say> punctuation to improve text-to-speech translation
 fastify.all('/incoming-call', async (request, reply) => {
-    currentCallSid = request.body.CallSid; // Capture the CallSid from the incoming request
+    console.log("Incoming call: ", {
+        query: request.query,
+        body: request.body
+    });
+    currentCallSid = request.body?.CallSid; // Capture the CallSid from the incoming request
     console.log('Incoming call SID:', currentCallSid);
     
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Connect>
+                              <Connect> 
                                   <Stream url="wss://${request.headers.host}/media-stream" />
                               </Connect>
                           </Response>`;
@@ -534,7 +538,7 @@ fastify.register(async (fastify) => {
     });
 });
 
-fastify.listen({ port: PORT }, (err) => {
+fastify.listen({ host: "0.0.0.0.", port: PORT }, (err) => {
     if (err) {
         console.error(err);
         process.exit(1);
